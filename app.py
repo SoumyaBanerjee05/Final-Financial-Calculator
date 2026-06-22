@@ -286,6 +286,15 @@ def sanitize_text(value: Any) -> Any:
     return value
 
 
+def sanitize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """Element-wise text cleanup compatible with pandas 2.x and 3.x."""
+    safe = df.copy()
+    for col in safe.columns:
+        if safe[col].dtype == "object":
+            safe[col] = safe[col].map(sanitize_text)
+    return safe
+
+
 def clean_num(value):
     if value is None:
         return None
@@ -671,9 +680,9 @@ def rolling_returns_from_transaction_nav(df):
 
 def excel_bytes(df, summary, rolling):
     out = io.BytesIO()
-    safe_df = clean_dataframe_for_excel(df.applymap(sanitize_text))
-    safe_summary = clean_dataframe_for_excel(summary.applymap(sanitize_text))
-    safe_rolling = clean_dataframe_for_excel(rolling.applymap(sanitize_text))
+    safe_df = clean_dataframe_for_excel(sanitize_dataframe(df))
+    safe_summary = clean_dataframe_for_excel(sanitize_dataframe(summary))
+    safe_rolling = clean_dataframe_for_excel(sanitize_dataframe(rolling))
     with pd.ExcelWriter(out, engine="openpyxl") as w:
         safe_df.to_excel(w, index=False, sheet_name="Transactions")
         safe_summary.to_excel(w, index=False, sheet_name="Summary")
@@ -727,7 +736,7 @@ def soa_analyzer():
     df = df.sort_values(["folio", "scheme", "date", "transaction"])
     cols = ["folio", "scheme", "date", "transaction", "amount", "nav", "units", "page", "source_engine", "confidence", "raw_text"]
     df = df[[x for x in cols if x in df.columns] + [x for x in df.columns if x not in cols]]
-    df = clean_dataframe_for_excel(df.applymap(sanitize_text))
+    df = clean_dataframe_for_excel(sanitize_dataframe(df))
 
     st.subheader("Extracted Financial Transactions")
     st.dataframe(df, width="stretch", hide_index=True)

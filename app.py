@@ -201,38 +201,185 @@ def cagr_calculator():
 
 def emi_calculator():
     st.subheader("EMI + Prepayment vs Mutual Fund")
-    principal=blank_number("Loan outstanding ₹", "emi_principal")
-    loan_rate=blank_number("Loan rate %", "emi_rate")
-    years=blank_number("Remaining tenure years", "emi_years")
-    mfret_in=blank_number("MF return % p.a.", "emi_mfret")
-    extra=blank_number("Extra EMI ₹/month", "emi_extra") or 0
-    one=blank_number("One-time prepay ₹", "emi_one") or 0
-    pre_m=blank_number("Prepay after month", "emi_pre_m") or 1
-    rec=blank_number("Recurring annual prepay ₹", "emi_rec") or 0
-    tax_in=blank_number("Tax on MF gains %", "emi_tax") or 0
-    if not ready(principal, loan_rate, years, mfret_in): return wait_msg()
-    rate=loan_rate/100/12; mfret=mfret_in/100; tax=tax_in/100; n=int(years*12)
-    if principal <= 0 or n <= 0: return st.error("Loan outstanding and tenure must be greater than 0.")
-    emi=principal*rate*(1+rate)**n/(((1+rate)**n)-1) if rate else principal/n
-    def sim(prepay):
-        bal=principal; month=0; interest=paid=0
-        while bal>1 and month<1200:
-            month+=1
-            if prepay and one and month==int(pre_m): amt=min(one,bal); bal-=amt; paid+=amt
-            if prepay and rec and month%12==0: amt=min(rec,bal); bal-=amt; paid+=amt
-            intr=bal*rate; pay=min(emi+(extra if prepay else 0), bal+intr); bal-=pay-intr; interest+=intr; paid+=pay
-            if bal<=1: break
-        return month, interest, paid
-    reg=sim(False); prep=sim(True); saved=reg[1]-prep[1]
-    mfr=(1+mfret)**(1/12)-1
-    fv_extra=extra*((((1+mfr)**n-1)/mfr)*(1+mfr)) if mfr else extra*n
-    fv_one=one*((1+mfret)**max(0,(n-int(pre_m)+1)/12)); fv=fv_extra+fv_one; invested=extra*n+one; post=invested+max(0,fv-invested)*(1-tax)
+
+    st.markdown("**Loan Details**")
+    lc1, lc2, lc3, lc4 = st.columns(4)
+    loan_category = lc1.selectbox(
+        "Loan category",
+        ["Home Loan", "Car Loan", "Personal Loan", "Business Loan", "Education Loan", "Custom Loan"],
+        index=None,
+        placeholder="Select loan type",
+        key="emi_loan_category",
+    )
+    principal = blank_number("Loan amount / outstanding ₹", "emi_principal_full")
+    loan_rate = blank_number("Interest rate % p.a.", "emi_rate_full")
+    years = blank_number("Remaining tenure years", "emi_years_full")
+
+    st.markdown("**Additional Repayment Options**")
+    rc1, rc2, rc3, rc4 = st.columns(4)
+    extra_emi = blank_number("Additional EMI ₹ / month", "emi_extra_full") or 0
+    one_time_prepay = blank_number("One-time prepayment ₹", "emi_one_time_full") or 0
+    prepay_month = blank_number("One-time prepayment after month", "emi_prepay_month_full") or 1
+    recurring_prepay = blank_number("Recurring prepayment ₹", "emi_recurring_full") or 0
+    prepay_frequency = st.selectbox(
+        "Recurring prepayment frequency",
+        ["None", "Monthly", "Quarterly", "Half-Yearly", "Yearly"],
+        index=None,
+        placeholder="Select frequency",
+        key="emi_recurring_frequency_full",
+    )
+    recurring_start_month = blank_number("Recurring prepayment starts after month", "emi_recurring_start_full") or 1
+    annual_prepay = blank_number("Annual extra prepayment ₹", "emi_annual_prepay_full") or 0
+
+    st.markdown("**Mutual Fund Alternative**")
+    mc1, mc2, mc3 = st.columns(3)
+    mf_return = blank_number("MF return % p.a.", "emi_mf_return_full")
+    inflation = blank_number("Inflation % p.a.", "emi_inflation_full") or 0
+    tax_on_gains = blank_number("Tax on MF gains %", "emi_tax_full") or 0
+
+    if not ready(principal, loan_rate, years, mf_return):
+        return wait_msg()
+    if principal <= 0 or years <= 0:
+        return st.error("Loan amount and tenure must be greater than 0.")
+
+    tenure_months = int(round(years * 12))
+    monthly_loan_rate = loan_rate / 100 / 12
+    emi = (
+        principal * monthly_loan_rate * (1 + monthly_loan_rate) ** tenure_months
+        / ((1 + monthly_loan_rate) ** tenure_months - 1)
+        if monthly_loan_rate
+        else principal / tenure_months
+    )
+
+    frequency = prepay_frequency or "None"
+
+    def is_recurring_prepay_month(month: int) -> bool:
+        if frequency == "None" or recurring_prepay <= 0 or month < int(recurring_start_month):
+            return False
+        diff = month - int(recurring_start_month)
+        if frequency == "Monthly":
+            return True
+        if frequency == "Quarterly":
+            return diff % 3 == 0
+        if frequency == "Half-Yearly":
+            return diff % 6 == 0
+        if frequency == "Yearly":
+            return diff % 12 == 0
+        return False
+
+    def simulate(use_prepay: bool):
+        balance = float(principal)
+        month = 0
+        total_interest = 0.0
+        total_paid = 0.0
+        total_extra_paid = 0.0
+        while balance > 1 and month < 1200:
+            month += 1
+
+            if use_prepay and one_time_prepay > 0 and month == int(prepay_month):
+                p = min(one_time_prepay, balance)
+                balance -= p
+                total_paid += p
+                total_extra_paid += p
+
+            if use_prepay and is_recurring_prepay_month(month):
+                p = min(recurring_prepay, balance)
+                balance -= p
+                total_paid += p
+                total_extra_paid += p
+
+            if use_prepay and annual_prepay > 0 and month % 12 == 0:
+                p = min(annual_prepay, balance)
+                balance -= p
+                total_paid += p
+                total_extra_paid += p
+
+            interest = balance * monthly_loan_rate
+            payment = min(emi + (extra_emi if use_prepay else 0), balance + interest)
+            principal_component = payment - interest
+            balance -= principal_component
+            total_interest += interest
+            total_paid += payment
+            if use_prepay:
+                total_extra_paid += max(0.0, payment - emi)
+            if balance <= 1:
+                balance = 0
+                break
+
+        return {
+            "months": month,
+            "total_interest": total_interest,
+            "total_paid": total_paid,
+            "total_extra_paid": total_extra_paid,
+        }
+
+    regular = simulate(False)
+    prepay = simulate(True)
+    interest_saved = max(0.0, regular["total_interest"] - prepay["total_interest"])
+    tenure_saved = max(0, regular["months"] - prepay["months"])
+
+    compare_months = tenure_months
+    mf_annual = mf_return / 100
+    mf_monthly = (1 + mf_annual) ** (1 / 12) - 1 if mf_annual > -1 else 0
+
+    fv_one_time = one_time_prepay * ((1 + mf_annual) ** max(0, (compare_months - int(prepay_month) + 1) / 12)) if one_time_prepay else 0
+    fv_extra_emi = (
+        extra_emi * ((((1 + mf_monthly) ** compare_months - 1) / mf_monthly) * (1 + mf_monthly))
+        if extra_emi and mf_monthly
+        else extra_emi * compare_months
+    )
+
+    fv_recurring = 0.0
+    recurring_invested = 0.0
+    for m in range(int(recurring_start_month), compare_months + 1):
+        if is_recurring_prepay_month(m):
+            fv_recurring += recurring_prepay * ((1 + mf_annual) ** max(0, (compare_months - m + 1) / 12))
+            recurring_invested += recurring_prepay
+
+    fv_annual = 0.0
+    annual_invested = 0.0
+    for m in range(12, compare_months + 1, 12):
+        if annual_prepay > 0:
+            fv_annual += annual_prepay * ((1 + mf_annual) ** max(0, (compare_months - m + 1) / 12))
+            annual_invested += annual_prepay
+
+    mf_future_value = fv_one_time + fv_extra_emi + fv_recurring + fv_annual
+    mf_invested = one_time_prepay + extra_emi * compare_months + recurring_invested + annual_invested
+    tax = max(0.0, tax_on_gains / 100)
+    mf_post_tax_value = mf_invested + max(0.0, mf_future_value - mf_invested) * (1 - tax)
+    real_mf_value = mf_post_tax_value / ((1 + inflation / 100) ** (compare_months / 12)) if inflation else mf_post_tax_value
+    real_advantage = real_mf_value - interest_saved
+
+    st.metric("Calculated EMI", money(emi))
     show_table([
-        {"Scenario":"No prepayment","Closure time":f"{reg[0]} months","Total interest":money(reg[1]),"Total paid":money(reg[2])},
-        {"Scenario":"With prepayment","Closure time":f"{prep[0]} months","Total interest":money(prep[1]),"Total paid":money(prep[2])},
-        {"Scenario":"MF alternative of extra/prepay cash","Closure time":"-","Total interest":"-","Total paid":money(post)},
+        {"Scenario": "No Prepayment", "Closure Time": f"{regular['months']} months", "Total Interest": money(regular['total_interest']), "Total Payment": money(regular['total_paid'])},
+        {"Scenario": "With Prepayment", "Closure Time": f"{prepay['months']} months", "Total Interest": money(prepay['total_interest']), "Total Payment": money(prepay['total_paid'])},
     ])
-    st.info(f"Calculated EMI: {money(emi)} · Interest saved through prepayment: {money(saved)}")
+
+    st.markdown("**Prepayment Impact**")
+    show_table([
+        {"Metric": "Loan Category", "Value": loan_category or "-"},
+        {"Metric": "Tenure Saved", "Value": f"{tenure_saved} months"},
+        {"Metric": "Interest Saved", "Value": money(interest_saved)},
+        {"Metric": "Total Extra / Prepayment Used", "Value": money(prepay['total_extra_paid'])},
+    ])
+
+    st.markdown("**MF Alternative of Same Cash Flow**")
+    show_table([
+        {"MF Alternative Component": "Future Value of One-time Prepayment", "Value": money(fv_one_time)},
+        {"MF Alternative Component": "Future Value of Additional EMI", "Value": money(fv_extra_emi)},
+        {"MF Alternative Component": "Future Value of Recurring Prepayment", "Value": money(fv_recurring)},
+        {"MF Alternative Component": "Future Value of Annual Prepayment", "Value": money(fv_annual)},
+        {"MF Alternative Component": "Total MF Future Value", "Value": money(mf_future_value)},
+        {"MF Alternative Component": "Post-tax MF Value", "Value": money(mf_post_tax_value)},
+        {"MF Alternative Component": "Inflation-adjusted Post-tax MF Value", "Value": money(real_mf_value)},
+        {"MF Alternative Component": "Inflation-adjusted Advantage / Loss vs Interest Saved", "Value": money(real_advantage)},
+    ])
+
+    if real_advantage > 0:
+        st.success("Decision Summary: Investing the same prepayment cash flow may create higher inflation-adjusted post-tax value, subject to market risk.")
+    else:
+        st.warning("Decision Summary: Loan prepayment may be better on inflation-adjusted post-tax basis, especially when risk-free interest saving is preferred.")
 
 
 # ---------- MF SOA parser ----------

@@ -10,6 +10,21 @@ import pandas as pd
 import pdfplumber
 import streamlit as st
 
+
+# Auto-generate unique keys for Streamlit number_input widgets.
+# This prevents StreamlitDuplicateElementId when different tabs reuse labels like "Years".
+from streamlit.delta_generator import DeltaGenerator
+_original_number_input = DeltaGenerator.number_input
+_number_input_counter = {"count": 0}
+def _number_input_with_unique_key(self, *args, **kwargs):
+    if kwargs.get("key") is None:
+        _number_input_counter["count"] += 1
+        label = str(args[0]) if args else str(kwargs.get("label", "number_input"))
+        safe_label = re.sub(r"[^a-zA-Z0-9_]+", "_", label).strip("_").lower()[:40]
+        kwargs["key"] = f"auto_number_{_number_input_counter['count']}_{safe_label}"
+    return _original_number_input(self, *args, **kwargs)
+DeltaGenerator.number_input = _number_input_with_unique_key
+
 st.set_page_config(page_title="Morning Coffee Wealth", page_icon="☕", layout="wide")
 
 st.markdown("""
@@ -40,7 +55,7 @@ def sip_fv(payment, annual_return, months):
     return payment*((((1+r)**months-1)/r)*(1+r))
 
 def show_table(rows):
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
 # ---------- calculators ----------
 def sip_calculator():
@@ -318,9 +333,9 @@ def soa_analyzer():
     if meta.get('low_text_warning'): st.warning('This looks like a scanned/image PDF. Upload the original AMC/CAMS/KFin generated PDF for best results.')
     if not rows: st.warning('No financial transaction rows were detected. Try a detailed transaction SOA/CAS PDF instead of a valuation-only statement.'); return
     df=pd.DataFrame(rows); cols=['folio','scheme','date','transaction','amount','nav','units','balance_units','amc_or_registrar','page','source_engine','confidence','raw_text']; df=df[[x for x in cols if x in df.columns]+[x for x in df.columns if x not in cols]]
-    st.dataframe(df,use_container_width=True,hide_index=True)
-    summary=make_summary(df); st.subheader('Folio / Scheme Summary'); st.dataframe(summary,use_container_width=True,hide_index=True)
-    c1,c2=st.columns(2); c1.download_button('Download CSV',df.to_csv(index=False).encode(), 'mf_soa_transactions.csv','text/csv', use_container_width=True); c2.download_button('Download Excel',excel_bytes(df,summary),'mf_soa_transactions.xlsx','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',use_container_width=True)
+    st.dataframe(df,width="stretch",hide_index=True)
+    summary=make_summary(df); st.subheader('Folio / Scheme Summary'); st.dataframe(summary,width="stretch",hide_index=True)
+    c1,c2=st.columns(2); c1.download_button('Download CSV',df.to_csv(index=False).encode(), 'mf_soa_transactions.csv','text/csv', width="stretch"); c2.download_button('Download Excel',excel_bytes(df,summary),'mf_soa_transactions.xlsx','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',width="stretch")
     with st.expander('Accuracy note'):
         st.write('Indian mutual fund SOA formats differ across AMCs, CAMS, KFintech and MF Central. Always reconcile exported rows with the original statement before client-facing reporting.')
 

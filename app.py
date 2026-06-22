@@ -10,6 +10,22 @@ import pandas as pd
 import pdfplumber
 import streamlit as st
 
+import re
+
+_ILLEGAL_XLSX_RE = re.compile(r"[\x00-\x08\x0B-\x0C\x0E-\x1F]")
+
+def clean_excel_value(value):
+    if isinstance(value, str):
+        return _ILLEGAL_XLSX_RE.sub(" ", value)[:32767]
+    return value
+
+def clean_dataframe_for_excel(dataframe):
+    safe = dataframe.copy()
+    for col in safe.columns:
+        if safe[col].dtype == "object":
+            safe[col] = safe[col].map(clean_excel_value)
+    return safe
+
 
 # Auto-generate unique keys for Streamlit number_input widgets.
 # This prevents StreamlitDuplicateElementId when different tabs reuse labels like "Years".
@@ -309,8 +325,11 @@ def make_summary(df):
 
 def excel_bytes(df,summary):
     out=io.BytesIO()
+    safe_df = clean_dataframe_for_excel(df)
+    safe_summary = clean_dataframe_for_excel(summary)
     with pd.ExcelWriter(out,engine='openpyxl') as w:
-        df.to_excel(w,index=False,sheet_name='Transactions'); summary.to_excel(w,index=False,sheet_name='Summary')
+        safe_df.to_excel(w,index=False,sheet_name='Transactions')
+        safe_summary.to_excel(w,index=False,sheet_name='Summary')
         for ws in w.book.worksheets:
             ws.freeze_panes='A2'
             for col in ws.columns:
@@ -332,7 +351,7 @@ def soa_analyzer():
     c=st.columns(4); c[0].metric('Pages',meta.get('pages',0)); c[1].metric('Text pages',max(meta.get('pymupdf_pages_with_text',0),meta.get('pdfplumber_pages_with_text',0))); c[2].metric('Table rows scanned',meta.get('table_rows_seen',0)); c[3].metric('Transactions found',meta.get('transactions_found',0))
     if meta.get('low_text_warning'): st.warning('This looks like a scanned/image PDF. Upload the original AMC/CAMS/KFin generated PDF for best results.')
     if not rows: st.warning('No financial transaction rows were detected. Try a detailed transaction SOA/CAS PDF instead of a valuation-only statement.'); return
-    df=pd.DataFrame(rows); cols=['folio','scheme','date','transaction','amount','nav','units','balance_units','amc_or_registrar','page','source_engine','confidence','raw_text']; df=df[[x for x in cols if x in df.columns]+[x for x in df.columns if x not in cols]]
+    df=pd.DataFrame(rows); df=clean_dataframe_for_excel(df); cols=['folio','scheme','date','transaction','amount','nav','units','balance_units','amc_or_registrar','page','source_engine','confidence','raw_text']; df=df[[x for x in cols if x in df.columns]+[x for x in df.columns if x not in cols]]
     st.dataframe(df,width="stretch",hide_index=True)
     summary=make_summary(df); st.subheader('Folio / Scheme Summary'); st.dataframe(summary,width="stretch",hide_index=True)
     c1,c2=st.columns(2); c1.download_button('Download CSV',df.to_csv(index=False).encode(), 'mf_soa_transactions.csv','text/csv', width="stretch"); c2.download_button('Download Excel',excel_bytes(df,summary),'mf_soa_transactions.xlsx','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',width="stretch")

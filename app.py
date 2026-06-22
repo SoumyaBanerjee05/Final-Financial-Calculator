@@ -234,29 +234,22 @@ def emi_calculator():
     ])
     st.info(f"Calculated EMI: {money(emi)} · Interest saved through prepayment: {money(saved)}")
 
-# ---------- MF SOA parser ----------
-# Transaction-first engine: only SIP Purchase, Purchase, Redemption / Switch Out.
-# It ignores remarks, exit-load sections, scheme objective text, disclosures and valuation-only rows.
 
-DATE_RE = re.compile(
-    r"\b(\d{1,2}[-/]\d{1,2}[-/]\d{2,4}|\d{1,2}[-/][A-Za-z]{3,9}[-/]\d{2,4}|\d{1,2}\s+[A-Za-z]{3,9}\s+\d{2,4})\b"
-)
+# ---------- MF SOA parser ----------
+# Accuracy-first engine: accept only dated financial transaction rows where Amount, NAV and Units are validated.
+# Core rule: amount should approximately equal NAV × units for purchases/redemptions.
+
+DATE_RE = re.compile(r"\b(\d{1,2}[-/]\d{1,2}[-/]\d{2,4}|\d{1,2}[-/][A-Za-z]{3,9}[-/]\d{2,4}|\d{1,2}\s+[A-Za-z]{3,9}\s+\d{2,4})\b")
 FOLIO_RE = re.compile(r"folio\s*(?:no\.?|number|#)?\s*[:\-]?\s*([A-Z0-9][A-Z0-9/\-]{2,})", re.I)
 NUM_RE = re.compile(r"[-+]?\(?₹?\d{1,3}(?:,\d{2,3})*(?:\.\d+)?\)?|[-+]?\(?₹?\d+(?:\.\d+)?\)?")
 
-STRICT_TRANSACTION_RE = re.compile(
-    r"\b(sip|systematic\s+investment|purchase|fresh\s+purchase|additional\s+purchase|subscription|lumpsum|lump\s+sum|redemption|redeem|repurchase|switch\s*out|switch-out|swp)\b",
-    re.I,
-)
-PURCHASE_RE = re.compile(r"\b(sip|systematic\s+investment|purchase|fresh\s+purchase|additional\s+purchase|subscription|lumpsum|lump\s+sum)\b", re.I)
-REDEMPTION_RE = re.compile(r"\b(redemption|redeem|repurchase|switch\s*out|switch-out|swp)\b", re.I)
-SIP_RE = re.compile(r"\b(sip|systematic\s+investment)\b", re.I)
+SIP_RE = re.compile(r"\b(sip|systematic\s+investment|auto\s+debit|ecs|nach)\b", re.I)
+PURCHASE_RE = re.compile(r"\b(purchase|fresh\s+purchase|additional\s+purchase|subscription|lumpsum|lump\s+sum|switch\s*in)\b", re.I)
+REDEMPTION_RE = re.compile(r"\b(redemption|redeem|repurchase|sell|swp|systematic\s+withdrawal|switch\s*out)\b", re.I)
+TRANSACTION_RE = re.compile(r"\b(sip|systematic\s+investment|purchase|fresh\s+purchase|additional\s+purchase|subscription|lumpsum|lump\s+sum|switch\s*in|redemption|redeem|repurchase|sell|swp|systematic\s+withdrawal|switch\s*out)\b", re.I)
 
 HARD_IGNORE_RE = re.compile(
-    r"remarks|entry\s*load|exit\s*load|w\.?e\.?f\.?|nil\s+if\s+redeemed|date\s+of\s+allotment|"
-    r"riskometer|benchmark|scheme\s+objective|investment\s+objective|disclaimer|note\s*:|nominee|bank\s+account|"
-    r"registrar|address|email|mobile|pan\s*:|kyc|current\s+value|market\s+value|closing\s+balance|opening\s+balance|"
-    r"grand\s+total|total\s+units|valuation|portfolio\s+summary|load\s+structure|expense\s+ratio",
+    r"(remarks?|entry\s*load|exit\s*load|w\.e\.f\.?|if\s+redeemed|within\s+\d+\s+days|riskometer|benchmark|scheme\s+objective|disclaimer|note\s*:|nominee|bank\s+account|registrar|address|email|mobile|pan\s*:|kyc|current\s+value|market\s+value|closing\s+balance|opening\s+balance|grand\s+total|total\s+units|valuation|portfolio\s+summary|load\s+structure|expense\s+ratio|stamp\s+duty|stt|tds|tax\s+deducted)",
     re.I,
 )
 SCHEME_HINT = re.compile(r"(fund|scheme|direct|regular|growth|idcw|dividend|equity|debt|hybrid|liquid|overnight|index|small cap|mid cap|large cap|flexi cap|elss|arbitrage)", re.I)
@@ -287,7 +280,6 @@ def sanitize_text(value: Any) -> Any:
 
 
 def sanitize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    """Element-wise text cleanup compatible with pandas 2.x and 3.x."""
     safe = df.copy()
     for col in safe.columns:
         if safe[col].dtype == "object":
@@ -299,10 +291,13 @@ def clean_num(value):
     if value is None:
         return None
     s = str(value).replace("₹", "").replace(",", "").strip()
-    neg = (s.startswith("(") and s.endswith(")")) or s.endswith(" Dr") or s.endswith(" DR")
-    s = s.replace("Dr", "").replace("DR", "").strip("() ")
+    if not s:
+        return None
+    neg = bool(re.search(r"\b(dr|debit)\b", s, re.I)) or (s.startswith("(") and s.endswith(")")) or s.startswith("-")
+    s = re.sub(r"\b(dr|cr|debit|credit)\b", "", s, flags=re.I).strip("() ")
+    s = re.sub(r"[^0-9.\-]", "", s)
     try:
-        n = float(s)
+        n = abs(float(s))
         return -n if neg else n
     except Exception:
         return None
@@ -315,14 +310,10 @@ def normalize_date(value):
             return datetime.strptime(s, fmt).strftime("%Y-%m-%d")
         except Exception:
             pass
-    return str(value)
-
-
-def parse_date_obj(value):
     try:
-        return datetime.strptime(normalize_date(value), "%Y-%m-%d")
+        return pd.to_datetime(s, dayfirst=True, errors="raise").strftime("%Y-%m-%d")
     except Exception:
-        return None
+        return str(value)
 
 
 def unlock_with_pymupdf(pdf_bytes, password):
@@ -343,14 +334,14 @@ def detect_context(text, ctx):
     f = FOLIO_RE.search(line)
     if f:
         ctx["folio"] = f.group(1).strip()
-    if AMC_HINT.search(line) and len(line) <= 160:
+    if AMC_HINT.search(line) and len(line) <= 180:
         ctx["amc_or_registrar"] = line
     if (
         SCHEME_HINT.search(line)
-        and len(line) <= 190
+        and len(line) <= 200
         and not DATE_RE.search(line)
         and not HARD_IGNORE_RE.search(line)
-        and not re.search(r"statement|account|investor|summary|transaction|service", line, re.I)
+        and not re.search(r"statement|account|investor|summary|transaction|service|folio|nominee", line, re.I)
     ):
         ctx["scheme"] = line
 
@@ -365,23 +356,9 @@ def classify_transaction(text):
     return ""
 
 
-def looks_like_transaction_text(text):
-    text = sanitize_text(text)
-    if len(text) < 10 or HARD_IGNORE_RE.search(text):
-        return False
-    if not DATE_RE.search(text):
-        return False
-    if not STRICT_TRANSACTION_RE.search(text):
-        return False
-    # Avoid factsheet remarks such as: W.e.f. 05-Sep-2025 if redeemed within 30 days
-    if re.search(r"if\s+redeemed|within\s+\d+\s+days|load", text, re.I):
-        return False
-    return True
-
-
 def header_key(cell):
     h = re.sub(r"[^a-z0-9]+", "", str(cell or "").lower())
-    if "date" in h or "posted" in h or "txn" in h and "date" in h:
+    if "date" in h or "txndate" in h or "traddate" in h or "posteddate" in h:
         return "date"
     if any(x in h for x in ["transaction", "description", "particular", "activity", "type", "narration"]):
         return "transaction"
@@ -394,149 +371,179 @@ def header_key(cell):
     return ""
 
 
+def row_to_line(row):
+    return " ".join(sanitize_text(c) for c in row if c is not None and sanitize_text(c))
+
+
 def find_header_mapping(table):
     best = None
-    for i, row in enumerate(table[:8]):
+    for i, row in enumerate(table[:12]):
         mapping = {}
         for j, cell in enumerate(row or []):
             key = header_key(cell)
             if key and key not in mapping:
                 mapping[key] = j
         score = sum(k in mapping for k in ["date", "transaction", "amount", "nav", "units"])
-        if score >= 3 and "date" in mapping and "transaction" in mapping:
+        if score >= 3 and "date" in mapping and ("transaction" in mapping or "amount" in mapping):
             best = (i, mapping)
             break
     return best
 
 
-def row_to_line(row):
-    return " ".join(sanitize_text(c) for c in row if c is not None and sanitize_text(c))
+def merge_table_continuations(table, header_idx):
+    merged = []
+    current = None
+    for row in table[header_idx + 1:]:
+        if not row or not any(str(c or "").strip() for c in row):
+            continue
+        line = row_to_line(row)
+        has_date = bool(DATE_RE.search(line))
+        if has_date:
+            if current is not None:
+                merged.append(current)
+            current = [(c or "") for c in row]
+        else:
+            if current is not None and not HARD_IGNORE_RE.search(line):
+                # append continuation text to transaction/narration-like cell or first non-empty cell
+                target = 1 if len(current) > 1 else 0
+                for idx, val in enumerate(row):
+                    val = sanitize_text(val)
+                    if val:
+                        if idx < len(current) and idx == target:
+                            current[idx] = sanitize_text(str(current[idx]) + " " + val)
+                        elif idx < len(current) and not str(current[idx]).strip():
+                            current[idx] = val
+            elif TRANSACTION_RE.search(line):
+                current = [(c or "") for c in row]
+    if current is not None:
+        merged.append(current)
+    return merged
+
+
+def candidate_numbers(text):
+    text = DATE_RE.sub(" ", sanitize_text(text), count=1)
+    out = []
+    for raw in NUM_RE.findall(text):
+        n = clean_num(raw)
+        if n is None:
+            continue
+        # remove obvious years, percentages/load days, tiny tax/load values are allowed only if table cells map them
+        if int(abs(n)) in {2020,2021,2022,2023,2024,2025,2026,2027,2028,2029,2030}:
+            continue
+        if abs(n) == 0:
+            continue
+        out.append(float(n))
+    return out
+
+
+def validate_amount_nav_units(amount, nav, units):
+    if amount is None or nav is None or units is None:
+        return False, None
+    amount_abs, nav_abs, units_abs = abs(float(amount)), abs(float(nav)), abs(float(units))
+    if amount_abs <= 0 or nav_abs <= 0 or units_abs <= 0:
+        return False, None
+    if nav_abs < 0.001 or nav_abs > 100000 or units_abs > 100000000 or amount_abs > 10000000000:
+        return False, None
+    calc = nav_abs * units_abs
+    rel_err = abs(calc - amount_abs) / max(1.0, amount_abs)
+    return rel_err <= 0.08, rel_err
+
+
+def infer_amount_nav_units(text):
+    nums = candidate_numbers(text)
+    if len(nums) < 2:
+        return {"amount": None, "nav": None, "units": None, "confidence_bonus": 0, "validation_error": None}
+    best = None
+    # Try all triples and find the combination where amount ~= nav * units.
+    for i, amount in enumerate(nums):
+        for j, nav in enumerate(nums):
+            if j == i:
+                continue
+            nav_abs = abs(nav)
+            if not (0.001 <= nav_abs <= 100000):
+                continue
+            for k, units in enumerate(nums):
+                if k in (i, j):
+                    continue
+                ok, err = validate_amount_nav_units(amount, nav, units)
+                if not ok:
+                    continue
+                # prefer larger rupee amount, decimal NAV, and rows near the end of line
+                score = (err or 0) + (0.02 if abs(amount) < 100 else 0) + (0 if abs(nav) != int(abs(nav)) else 0.01)
+                if best is None or score < best[0]:
+                    best = (score, amount, abs(nav), abs(units), err)
+    if best:
+        _, amount, nav, units, err = best
+        return {"amount": abs(amount), "nav": nav, "units": units, "confidence_bonus": max(0, 0.25 - (err or 0)), "validation_error": err}
+
+    # If exact validation cannot be done, use conservative pattern labels from the text.
+    lowered = text.lower()
+    amount = nav = units = None
+    m = re.search(r"(?:amount|amt|gross)\D{0,20}([\d,]+(?:\.\d+)?)", lowered, re.I)
+    if m: amount = clean_num(m.group(1))
+    m = re.search(r"nav\D{0,20}([\d,]+(?:\.\d+)?)", lowered, re.I)
+    if m: nav = clean_num(m.group(1))
+    m = re.search(r"units?\D{0,20}([\d,]+(?:\.\d+)?)", lowered, re.I)
+    if m: units = clean_num(m.group(1))
+    ok, err = validate_amount_nav_units(amount, nav, units)
+    if ok:
+        return {"amount": abs(amount), "nav": abs(nav), "units": abs(units), "confidence_bonus": 0.18, "validation_error": err}
+    return {"amount": None, "nav": None, "units": None, "confidence_bonus": 0, "validation_error": None}
+
+
+def build_txn(page, engine, ctx, date_text, typ, amount, nav, units, raw_text, base_conf=0.55, validation_error=None):
+    if typ == "Redemption":
+        if amount is not None: amount = -abs(amount)
+        if units is not None: units = -abs(units)
+    else:
+        if amount is not None: amount = abs(amount)
+        if units is not None: units = abs(units)
+    if amount is None or nav is None or units is None:
+        return None
+    ok, err = validate_amount_nav_units(amount, nav, units)
+    if not ok:
+        return None
+    conf = base_conf + 0.2 + (0.04 if ctx.get("folio") else 0) + (0.04 if ctx.get("scheme") else 0) + max(0, 0.08 - (err or 0))
+    return Txn(page, engine, ctx.get("amc_or_registrar", ""), ctx.get("folio", ""), ctx.get("scheme", ""), normalize_date(date_text), typ, amount, nav, units, sanitize_text(raw_text), round(min(conf, 0.99), 2))
 
 
 def parse_table_row(row, mapping, page, ctx, engine):
+    full = row_to_line(row)
+    if not full or HARD_IGNORE_RE.search(full) or not DATE_RE.search(full) or not TRANSACTION_RE.search(full):
+        return None
+    typ = classify_transaction(full)
+    if typ not in {"SIP Purchase", "Purchase", "Redemption"}:
+        return None
     def cell(key):
         idx = mapping.get(key)
         if idx is None or idx >= len(row):
             return ""
         return sanitize_text(row[idx])
-
-    full = row_to_line(row)
-    if HARD_IGNORE_RE.search(full):
-        return None
-
-    date_text = cell("date") or (DATE_RE.search(full).group(1) if DATE_RE.search(full) else "")
-    txn_text = cell("transaction") or full
-    if not date_text or not STRICT_TRANSACTION_RE.search(txn_text + " " + full):
-        return None
-    if re.search(r"if\s+redeemed|within\s+\d+\s+days|entry\s*load|exit\s*load|remarks", full, re.I):
-        return None
-
-    typ = classify_transaction(txn_text + " " + full)
-    if typ not in {"SIP Purchase", "Purchase", "Redemption"}:
-        return None
-
+    date_text = cell("date") or DATE_RE.search(full).group(1)
     amount = clean_num(cell("amount"))
     nav = clean_num(cell("nav"))
     units = clean_num(cell("units"))
-
-    if amount is None or nav is None or units is None:
-        inferred = infer_from_line(full, typ)
-        amount = amount if amount is not None else inferred.get("amount")
-        nav = nav if nav is not None else inferred.get("nav")
-        units = units if units is not None else inferred.get("units")
-
-    if amount is None and units is None:
-        return None
-    if typ == "Redemption":
-        if amount is not None and amount > 0:
-            amount = -amount
-        if units is not None and units > 0:
-            units = -units
-
-    conf = 0.72 + (0.08 if nav else 0) + (0.08 if units else 0) + (0.05 if amount else 0) + (0.03 if ctx.get("folio") else 0) + (0.04 if ctx.get("scheme") else 0)
-    return Txn(page, engine, ctx.get("amc_or_registrar", ""), ctx.get("folio", ""), ctx.get("scheme", ""), normalize_date(date_text), typ, amount, nav, units, full, round(min(conf, 0.99), 2))
-
-
-def infer_from_line(line, typ):
-    # Remove date first; parse only the financial tail after transaction text.
-    text = DATE_RE.sub(" ", sanitize_text(line), count=1)
-    nums = [n for n in (clean_num(x) for x in NUM_RE.findall(text)) if n is not None]
-    nums = [n for n in nums if abs(n) > 0 and abs(n) != 2024 and abs(n) != 2025 and abs(n) != 2026]
-    if not nums:
-        return {"amount": None, "nav": None, "units": None}
-
-    amount = nav = units = None
-    # NAV is usually a decimal between 1 and 10000. Units often has 3 decimals. Amount often >= 10.
-    # Common order in SOAs: amount, NAV, units, balance units OR units, amount, NAV.
-    tail = nums[-5:]
-    if len(tail) >= 3:
-        # pick amount as largest absolute rupee-like value; NAV as decimal plausible not equal amount; units via amount/NAV closest if possible
-        amount_candidates = [x for x in tail if abs(x) >= 1]
-        amount = max(amount_candidates, key=lambda x: abs(x)) if amount_candidates else None
-        nav_candidates = [x for x in tail if 1 <= abs(x) <= 10000 and x != amount]
-        # prefer NAV that reconstructs an existing unit quantity
-        best_nav = None; best_err = 999
-        for cand in nav_candidates:
-            if amount and cand:
-                implied = abs(amount) / abs(cand)
-                err = min([abs(abs(v) - implied) / max(1, implied) for v in tail if v not in (amount, cand)] or [999])
-                if err < best_err:
-                    best_err = err; best_nav = cand
-        nav = best_nav or (nav_candidates[0] if nav_candidates else None)
-        if amount is not None and nav not in (None, 0):
-            implied_units = abs(amount) / abs(nav)
-            candidates = [x for x in tail if x not in (amount, nav) and abs(x) > 0]
-            if candidates:
-                units = min(candidates, key=lambda x: abs(abs(x) - implied_units))
-            else:
-                units = implied_units
-    elif len(tail) == 2:
-        amount, units = tail[-2], tail[-1]
-    elif len(tail) == 1:
-        amount = tail[0]
-
-    if typ == "Redemption":
-        if amount is not None and amount > 0: amount = -amount
-        if units is not None and units > 0: units = -units
-    return {"amount": amount, "nav": nav, "units": units}
+    ok, err = validate_amount_nav_units(amount, nav, units)
+    if not ok:
+        inferred = infer_amount_nav_units(full)
+        amount, nav, units, err = inferred["amount"], inferred["nav"], inferred["units"], inferred["validation_error"]
+    return build_txn(page, engine, ctx, date_text, typ, amount, nav, units, full, base_conf=0.68, validation_error=err)
 
 
 def parse_text_line(line, page, ctx, engine):
     line = sanitize_text(line)
-    if not looks_like_transaction_text(line):
+    if not line or HARD_IGNORE_RE.search(line) or not DATE_RE.search(line) or not TRANSACTION_RE.search(line):
+        return None
+    # Reject narrative lines that only describe loads/remarks but contain redemption words.
+    if re.search(r"if\s+redeemed|within\s+\d+\s+days|entry\s*load|exit\s*load|remarks", line, re.I):
         return None
     typ = classify_transaction(line)
     if typ not in {"SIP Purchase", "Purchase", "Redemption"}:
         return None
-    date_text = DATE_RE.search(line).group(1)
-    vals = infer_from_line(line, typ)
-    if vals["amount"] is None and vals["units"] is None:
+    inferred = infer_amount_nav_units(line)
+    if inferred["amount"] is None:
         return None
-    conf = 0.52 + (0.1 if vals["nav"] else 0) + (0.1 if vals["units"] else 0) + (0.08 if vals["amount"] else 0) + (0.05 if ctx.get("folio") else 0) + (0.05 if ctx.get("scheme") else 0)
-    return Txn(page, engine, ctx.get("amc_or_registrar", ""), ctx.get("folio", ""), ctx.get("scheme", ""), normalize_date(date_text), typ, vals["amount"], vals["nav"], vals["units"], line, round(min(conf, 0.92), 2))
-
-
-def extract_with_pymupdf(pdf_bytes):
-    txns = []
-    ctx = {"amc_or_registrar": "", "folio": "", "scheme": ""}
-    pages_text = 0
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    for i, page in enumerate(doc, start=1):
-        text = page.get_text("text") or ""
-        if len(text.strip()) > 50:
-            pages_text += 1
-        for line in text.splitlines():
-            detect_context(line, ctx)
-            t = parse_text_line(line, i, ctx, "PyMuPDF-text")
-            if t: txns.append(t)
-        for block in page.get_text("blocks") or []:
-            line = block[4] if len(block) >= 5 else ""
-            detect_context(line, ctx)
-            t = parse_text_line(line, i, ctx, "PyMuPDF-block")
-            if t: txns.append(t)
-    pages = len(doc)
-    doc.close()
-    return txns, {"pages": pages, "pymupdf_pages_with_text": pages_text}
+    return build_txn(page, engine, ctx, DATE_RE.search(line).group(1), typ, inferred["amount"], inferred["nav"], inferred["units"], line, base_conf=0.50 + inferred.get("confidence_bonus", 0), validation_error=inferred.get("validation_error"))
 
 
 def extract_with_pdfplumber(pdf_bytes):
@@ -552,8 +559,6 @@ def extract_with_pdfplumber(pdf_bytes):
                 pages_text += 1
             for line in text.splitlines():
                 detect_context(line, ctx)
-                t = parse_text_line(line, i, ctx, "pdfplumber-text")
-                if t: txns.append(t)
             try:
                 tables = page.extract_tables(table_settings={
                     "vertical_strategy": "text", "horizontal_strategy": "text",
@@ -562,37 +567,75 @@ def extract_with_pdfplumber(pdf_bytes):
                 }) or []
             except Exception:
                 tables = []
+            page_table_txns = []
             for table in tables:
                 header = find_header_mapping(table)
                 if not header:
                     continue
                 transaction_tables += 1
                 header_idx, mapping = header
-                for row in table[header_idx + 1:]:
+                for row in merge_table_continuations(table, header_idx):
                     table_rows_seen += 1
-                    if not row:
-                        continue
                     line = row_to_line(row)
                     detect_context(line, ctx)
                     t = parse_table_row(row, mapping, i, ctx, "pdfplumber-table")
-                    if t: txns.append(t)
+                    if t:
+                        page_table_txns.append(t)
+            # Use text fallback only when table extraction found no valid transactions on the page.
+            if not page_table_txns:
+                for line in text.splitlines():
+                    detect_context(line, ctx)
+                    t = parse_text_line(line, i, ctx, "pdfplumber-text-fallback")
+                    if t:
+                        txns.append(t)
+            txns.extend(page_table_txns)
     return txns, {"pdfplumber_pages_with_text": pages_text, "table_rows_seen": table_rows_seen, "transaction_tables": transaction_tables}
+
+
+def extract_with_pymupdf_fallback(pdf_bytes):
+    txns = []
+    ctx = {"amc_or_registrar": "", "folio": "", "scheme": ""}
+    pages_text = 0
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    for i, page in enumerate(doc, start=1):
+        text = page.get_text("text") or ""
+        if len(text.strip()) > 50:
+            pages_text += 1
+        for line in text.splitlines():
+            detect_context(line, ctx)
+            t = parse_text_line(line, i, ctx, "PyMuPDF-text-fallback")
+            if t:
+                txns.append(t)
+    pages = len(doc)
+    doc.close()
+    return txns, {"pages": pages, "pymupdf_pages_with_text": pages_text}
 
 
 @st.cache_data(show_spinner=False)
 def extract_transactions(pdf_bytes, password):
     unlocked = unlock_with_pymupdf(pdf_bytes, password)
-    a, ma = extract_with_pymupdf(unlocked)
-    b, mb = extract_with_pdfplumber(unlocked)
-    rank = {"pdfplumber-table": 4, "pdfplumber-text": 3, "PyMuPDF-block": 2, "PyMuPDF-text": 1}
+    table_txns, mb = extract_with_pdfplumber(unlocked)
+    # Only use PyMuPDF if pdfplumber found too few transactions. This prevents duplicate/wrong fallback rows.
+    if len(table_txns) >= 2:
+        all_txns = table_txns
+        ma = {"pages": None, "pymupdf_pages_with_text": 0}
+    else:
+        fallback_txns, ma = extract_with_pymupdf_fallback(unlocked)
+        all_txns = table_txns + fallback_txns
+
+    rank = {"pdfplumber-table": 5, "pdfplumber-text-fallback": 3, "PyMuPDF-text-fallback": 2}
     unique = {}
-    for t in a + b:
-        # Deduplicate same economic transaction across engines. Do not use raw_text in key.
+    for t in all_txns:
         key = (t.folio, t.scheme, t.date, t.transaction, round(t.amount or 0, 2), round(t.nav or 0, 6), round(t.units or 0, 6))
         if key not in unique or rank.get(t.source_engine, 0) > rank.get(unique[key].source_engine, 0):
             unique[key] = t
     rows = sorted(unique.values(), key=lambda x: (x.folio, x.scheme, x.date, x.transaction, x.page))
-    meta = {**ma, **mb, "transactions_found": len(rows), "engines_used": "PyMuPDF + pdfplumber + pandas", "low_text_warning": ma.get("pymupdf_pages_with_text", 0) == 0 and mb.get("pdfplumber_pages_with_text", 0) == 0}
+    meta = {**ma, **mb, "transactions_found": len(rows), "engines_used": "pdfplumber table-first + PyMuPDF fallback", "low_text_warning": mb.get("pdfplumber_pages_with_text", 0) == 0 and ma.get("pymupdf_pages_with_text", 0) == 0}
+    if meta.get("pages") is None:
+        try:
+            doc = fitz.open(stream=unlocked, filetype="pdf"); meta["pages"] = len(doc); doc.close()
+        except Exception:
+            meta["pages"] = 0
     return [asdict(r) for r in rows], meta
 
 
@@ -604,6 +647,27 @@ def weighted_average_nav(df):
     if p.empty:
         return None
     return float(p["amount_abs"].sum() / p["units_abs"].sum())
+
+
+def calculate_cagr_from_nav(df, current_nav, as_of_date=None):
+    p = df[df["transaction"].isin(["SIP Purchase", "Purchase"])].copy()
+    if p.empty or not current_nav:
+        return None
+    p["date_obj"] = pd.to_datetime(p["date"], errors="coerce")
+    p["units_abs"] = pd.to_numeric(p["units"], errors="coerce").abs()
+    p = p.dropna(subset=["date_obj", "units_abs"])
+    p = p[p["units_abs"] > 0]
+    if p.empty:
+        return None
+    avg_nav = weighted_average_nav(df)
+    if not avg_nav or avg_nav <= 0:
+        return None
+    end = pd.to_datetime(as_of_date) if as_of_date else pd.Timestamp.today()
+    weighted_days = ((end - p["date_obj"]).dt.days * p["units_abs"]).sum() / p["units_abs"].sum()
+    years = weighted_days / 365.25
+    if years <= 0:
+        return None
+    return ((float(current_nav) / avg_nav) ** (1 / years) - 1) * 100
 
 
 def make_summary(df, current_nav=None, as_of_date=None):
@@ -630,27 +694,6 @@ def make_summary(df, current_nav=None, as_of_date=None):
         "transactions": len(work),
         "average_confidence": work["confidence"].mean() if "confidence" in work else None,
     }])
-
-
-def calculate_cagr_from_nav(df, current_nav, as_of_date=None):
-    p = df[df["transaction"].isin(["SIP Purchase", "Purchase"])].copy()
-    if p.empty or not current_nav:
-        return None
-    p["date_obj"] = pd.to_datetime(p["date"], errors="coerce")
-    p["units_abs"] = pd.to_numeric(p["units"], errors="coerce").abs()
-    p = p.dropna(subset=["date_obj", "units_abs"])
-    p = p[p["units_abs"] > 0]
-    if p.empty:
-        return None
-    avg_nav = weighted_average_nav(df)
-    if not avg_nav or avg_nav <= 0:
-        return None
-    end = pd.to_datetime(as_of_date) if as_of_date else pd.Timestamp.today()
-    weighted_days = ((end - p["date_obj"]).dt.days * p["units_abs"]).sum() / p["units_abs"].sum()
-    years = weighted_days / 365.25
-    if years <= 0:
-        return None
-    return ((float(current_nav) / avg_nav) ** (1 / years) - 1) * 100
 
 
 def rolling_returns_from_transaction_nav(df):
@@ -697,8 +740,8 @@ def excel_bytes(df, summary, rolling):
 
 def soa_analyzer():
     st.subheader("Mutual Fund SOA Analyzer")
-    st.caption("Strict transaction parser: extracts only SIP Purchase, Purchase and Redemption rows with Amount, NAV and Units. Ignores remarks/load/disclosure text.")
-    uploaded = st.file_uploader("Upload AMC / CAMS / KFintech / MF Central statement PDF", type=["pdf"])
+    st.caption("Accuracy-first parser: keeps only SIP Purchase, Purchase and Redemption/SWP/Switch Out rows where Amount ≈ NAV × Units. Narrative text, load remarks and valuation summaries are rejected.")
+    uploaded = st.file_uploader("Upload AMC / CAMS / KFintech / MF Central detailed transaction statement PDF", type=["pdf"])
     password = st.text_input("PDF password, if protected", type="password")
     cnav_col, date_col = st.columns(2)
     nav_raw = cnav_col.text_input("Current NAV for CAGR/current value", value="", key="soa_current_nav", placeholder="")
@@ -712,7 +755,7 @@ def soa_analyzer():
         st.info("Upload a detailed folio-based mutual fund Statement of Account PDF to start.")
         return
     try:
-        with st.spinner("Reading PDF and extracting only purchase/SIP/redemption transactions..."):
+        with st.spinner("Extracting validated purchase/SIP/redemption transactions..."):
             rows, meta = extract_transactions(uploaded.read(), password or None)
     except Exception as e:
         st.error(str(e))
@@ -722,19 +765,22 @@ def soa_analyzer():
     c[1].metric("Text pages", max(meta.get("pymupdf_pages_with_text", 0), meta.get("pdfplumber_pages_with_text", 0)))
     c[2].metric("Transaction tables", meta.get("transaction_tables", 0))
     c[3].metric("Rows scanned", meta.get("table_rows_seen", 0))
-    c[4].metric("Transactions found", meta.get("transactions_found", 0))
+    c[4].metric("Validated txns", meta.get("transactions_found", 0))
     if meta.get("low_text_warning"):
         st.warning("This looks like a scanned/image PDF. Upload the original AMC/CAMS/KFin generated PDF for best results.")
     if not rows:
-        st.warning("No SIP Purchase, Purchase or Redemption transaction rows were detected. Upload a detailed transaction SOA/CAS PDF, not a valuation-only statement.")
+        st.warning("No validated SIP Purchase, Purchase or Redemption rows were detected. Use a detailed transaction SOA/CAS PDF where Amount, NAV and Units are visible in the transaction table.")
         return
 
     df = pd.DataFrame(rows)
     for col in ["amount", "nav", "units"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
     df = df[df["transaction"].isin(["SIP Purchase", "Purchase", "Redemption"])]
+    df = df.dropna(subset=["amount", "nav", "units"])
+    df["validation_check"] = (df["amount"].abs() - (df["nav"].abs() * df["units"].abs())).abs() / df["amount"].abs().clip(lower=1)
+    df = df[df["validation_check"] <= 0.08]
     df = df.sort_values(["folio", "scheme", "date", "transaction"])
-    cols = ["folio", "scheme", "date", "transaction", "amount", "nav", "units", "page", "source_engine", "confidence", "raw_text"]
+    cols = ["folio", "scheme", "date", "transaction", "amount", "nav", "units", "validation_check", "page", "source_engine", "confidence", "raw_text"]
     df = df[[x for x in cols if x in df.columns] + [x for x in df.columns if x not in cols]]
     df = clean_dataframe_for_excel(sanitize_dataframe(df))
 
@@ -744,8 +790,7 @@ def soa_analyzer():
     summary = make_summary(df, current_nav if current_nav > 0 else None, as_of_date)
     rolling = rolling_returns_from_transaction_nav(df)
     st.subheader("Summary")
-    s = summary.copy()
-    display_s = s.copy()
+    display_s = summary.copy()
     for col in ["purchase_amount", "redemption_amount", "net_invested_cashflow", "current_value"]:
         if col in display_s: display_s[col] = display_s[col].map(lambda x: money(x) if pd.notna(x) else "")
     for col in ["weighted_average_purchase_nav", "current_nav"]:
@@ -758,14 +803,13 @@ def soa_analyzer():
     roll_display = rolling.copy()
     roll_display["Average Rolling Return"] = roll_display["Average Rolling Return"].map(lambda x: "Not enough NAV observations" if pd.isna(x) or x is None else pct(x))
     st.dataframe(roll_display, width="stretch", hide_index=True)
-    st.caption("Rolling returns are calculated from NAV values found in the SOA transaction rows. For exact rolling returns, the app would need historical daily NAV data.")
+    st.caption("Rolling returns here use NAV values found inside the SOA transaction rows. Exact fund rolling returns require daily/monthly historical NAV data, which is not present in most SOA PDFs.")
 
     c1, c2 = st.columns(2)
     c1.download_button("Download CSV", df.to_csv(index=False).encode(), "mf_soa_transactions.csv", "text/csv", width="stretch")
     c2.download_button("Download Excel", excel_bytes(df, summary, rolling), "mf_soa_analysis.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", width="stretch")
     with st.expander("Parser rule used"):
-        st.write("The SOA Analyzer now keeps only rows with a valid date and transaction keyword: SIP/Systematic Investment, Purchase/Subscription/Lumpsum, Redemption/Redeem/Repurchase/SWP/Switch Out. It rejects rows containing Remarks, Entry Load, Exit Load, W.e.f., riskometer, benchmark, nominee, bank, disclaimer and valuation-summary text.")
-
+        st.write("Only dated rows containing SIP/Purchase/Redemption/SWP/Switch Out keywords are considered. A row is accepted only when the extracted amount, NAV and units pass the validation: amount is approximately equal to NAV multiplied by units. Remarks, Entry Load, Exit Load, W.e.f., scheme objective, riskometer, benchmark, nominee, bank, disclaimer and valuation-summary rows are rejected.")
 
 
 # ---------- UI routing ----------

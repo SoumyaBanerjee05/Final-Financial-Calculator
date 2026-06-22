@@ -1,36 +1,32 @@
-# Morning Coffee Wealth - Final Streamlit App
+# Morning Coffee Wealth - Financial Calculators + MF SOA Analyzer
 
-Includes:
-- MF SOA Analyzer with strict transaction-only parser
-- SIP Calculator
-- Step-up SIP Calculator
-- STP Calculator
-- EMI vs Mutual Fund Calculator
-- Lumpsum Calculator
-- SWP Calculator
-- Goal SIP Calculator
-- Retirement Calculator
-- CAGR Calculator
+Streamlit app with blank calculator inputs and an accuracy-first Mutual Fund SOA Analyzer.
 
-All calculator inputs are blank by default. Calculations appear only after the user enters the required values.
+## MF SOA Analyzer rule
+The parser only accepts dated transaction rows for:
+- SIP Purchase
+- Purchase / Lumpsum / Switch In
+- Redemption / SWP / Switch Out
 
-## Run locally
+A row is accepted only when Amount, NAV and Units pass the validation:
 
-```bash
-pip install -r requirements.txt
-streamlit run app.py
-```
+`Amount ≈ NAV × Units`
+
+Narrative text such as remarks, entry load, exit load, riskometer, benchmark, nominee, bank details, disclosures and valuation summaries are rejected.
 
 ## Deploy on Streamlit Cloud
-
-Upload these files to the root of your GitHub repository:
-
+Upload these files to the root of your GitHub repo:
 - app.py
 - requirements.txt
 - README.md
 
-Set main file path as:
+Main file path:
+`app.py`
 
-```text
-app.py
-```
+## Requirements
+Uses only zero-cost packages:
+- streamlit
+- pandas
+- pdfplumber
+- PyMuPDF
+- openpyxl
